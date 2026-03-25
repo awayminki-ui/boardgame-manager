@@ -394,6 +394,221 @@ function MethodManager({ game, onClose }) {
     </>
   );
 }
+function SupervisorDashboard({ userProfile, stores, onLogout }) {
+  const [myStores, setMyStores] = useState([]);
+  const [selectedStore, setSelectedStore] = useState(null);
+  const [games, setGames] = useState([]);
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState("dashboard");
+  const [allUsers, setAllUsers] = useState([]);
+  const [pendingUsers, setPendingUsers] = useState([]);
+
+  useEffect(() => { loadMyStores(); }, []);
+
+  async function loadMyStores() {
+    setLoading(true);
+    if (userProfile.role === "master") {
+      setMyStores(stores);
+      if (stores.length > 0) setSelectedStore(stores[0]);
+    } else {
+      const { data } = await supabase.from("supervisor_stores").select("*, stores(*)").eq("supervisor_id", userProfile.id);
+      if (data) {
+        const s = data.map(d => d.stores);
+        setMyStores(s);
+        if (s.length > 0) setSelectedStore(s[0]);
+      }
+    }
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    if (selectedStore) { loadGames(); loadLogs(); }
+  }, [selectedStore]);
+
+  useEffect(() => {
+    if (tab === "users") { loadAllUsers(); loadPendingUsers(); }
+  }, [tab]);
+
+  async function loadGames() {
+    const { data } = await supabase.from("games").select("*").order("name");
+    if (data) setGames(data);
+  }
+
+  async function loadLogs() {
+    if (!selectedStore) return;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const { data } = await supabase.from("game_logs").select("*, games(name), users(name)")
+      .eq("store_id", selectedStore.id)
+      .gte("managed_at", today.toISOString());
+    if (data) setLogs(data);
+  }
+
+  async function loadAllUsers() {
+    const { data } = await supabase.from("users").select("*, stores(name)").order("created_at", { ascending: false });
+    if (data) setAllUsers(data);
+  }
+
+  async function loadPendingUsers() {
+    const { data } = await supabase.from("users").select("*, stores(name)").eq("status", "pending").order("created_at");
+    if (data) setPendingUsers(data);
+  }
+
+  async function approveUser(uid) {
+    await supabase.from("users").update({ status: "approved" }).eq("id", uid);
+    loadPendingUsers(); loadAllUsers();
+  }
+
+  async function rejectUser(uid) {
+    await supabase.from("users").update({ status: "rejected" }).eq("id", uid);
+    loadPendingUsers(); loadAllUsers();
+  }
+
+  // 오늘 관리된 게임 ID 목록
+  const managedGameIds = new Set(logs.map(l => l.game_id));
+
+  // 주기별 오늘 관리 필요한 게임
+  function isDue(game) {
+    const cycleDays = { daily: 1, weekly: 7, monthly: 30 };
+    // 대시보드에서는 단순히 오늘 관리됐는지 여부만 체크
+    return !managedGameIds.has(game.id);
+  }
+
+  const dueGames = games.filter(g => !managedGameIds.has(g.id));
+  const doneGames = games.filter(g => managedGameIds.has(g.id));
+  const progress = games.length > 0 ? Math.round((doneGames.length / games.length) * 100) : 0;
+
+  if (loading) return <div style={{ textAlign: "center", padding: "4rem", color: "#666", fontFamily: "sans-serif" }}>불러오는 중...</div>;
+
+  return (
+    <div style={{ maxWidth: 760, margin: "0 auto", padding: "1.5rem 1rem", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 500, color: "#f0f0f0" }}>
+            {userProfile.role === "master" ? "마스터 관리자" : "슈퍼바이저"}
+          </h1>
+          <p style={S.muted}>{userProfile.name}</p>
+        </div>
+        <button onClick={onLogout} style={S.btn}>로그아웃</button>
+      </div>
+
+      {/* 탭 */}
+      <div style={{ display: "flex", gap: 8, marginBottom: "1rem", flexWrap: "wrap" }}>
+        {["dashboard", "users"].map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{ ...S.btn, background: tab === t ? "#2a2a2a" : "transparent", fontWeight: tab === t ? 500 : 400 }}>
+            {t === "dashboard" ? "대시보드" : `계정 관리 ${pendingUsers.length > 0 ? `(대기 ${pendingUsers.length})` : ""}`}
+          </button>
+        ))}
+      </div>
+
+      {tab === "dashboard" && (<>
+        {/* 매장 선택 */}
+        {myStores.length > 1 && (
+          <div style={{ display: "flex", gap: 8, marginBottom: "1rem", flexWrap: "wrap" }}>
+            {myStores.map(s => (
+              <button key={s.id} onClick={() => setSelectedStore(s)} style={{ ...S.btn, background: selectedStore?.id === s.id ? "#2563eb" : "transparent", borderColor: selectedStore?.id === s.id ? "#2563eb" : "#555", color: selectedStore?.id === s.id ? "#fff" : "#e8e8e8" }}>
+                {s.name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {myStores.length === 0 ? (
+          <div style={{ ...S.card, textAlign: "center" }}>
+            <p style={S.muted}>담당 매장이 없습니다. 마스터 관리자에게 문의하세요.</p>
+          </div>
+        ) : (<>
+          {/* 진행률 카드 */}
+          <div style={{ ...S.card, marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div>
+                <p style={{ margin: 0, fontSize: 15, fontWeight: 500, color: "#f0f0f0" }}>{selectedStore?.name} — 오늘 관리 현황</p>
+                <p style={S.muted}>{new Date().toLocaleDateString("ko-KR", { year: "numeric", month: "long", day: "numeric", weekday: "long" })}</p>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <p style={{ margin: 0, fontSize: 28, fontWeight: 500, color: progress === 100 ? "#4ade80" : "#f0f0f0" }}>{progress}%</p>
+                <p style={S.muted}>{doneGames.length} / {games.length}개</p>
+              </div>
+            </div>
+            {/* 진행률 바 */}
+            <div style={{ background: "#2a2a2a", borderRadius: 8, height: 8, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${progress}%`, background: progress === 100 ? "#16a34a" : "#2563eb", borderRadius: 8, transition: "width 0.3s" }} />
+            </div>
+          </div>
+
+          {/* 요약 카드 3개 */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 16 }}>
+            {[
+              { label: "전체 게임", value: games.length, color: "#f0f0f0" },
+              { label: "완료", value: doneGames.length, color: "#4ade80" },
+              { label: "미완료", value: dueGames.length, color: "#f87171" },
+            ].map(item => (
+              <div key={item.label} style={{ background: "#1e1e1e", border: "1px solid #333", borderRadius: 12, padding: "1rem", textAlign: "center" }}>
+                <p style={{ margin: "0 0 4px", fontSize: 13, color: "#666" }}>{item.label}</p>
+                <p style={{ margin: 0, fontSize: 24, fontWeight: 500, color: item.color }}>{item.value}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* 미완료 게임 목록 */}
+          {dueGames.length > 0 && (
+            <div style={S.card}>
+              <p style={{ fontSize: 14, fontWeight: 500, color: "#f87171", marginBottom: 12 }}>미완료 게임 ({dueGames.length}개)</p>
+              {dueGames.map(g => (
+                <div key={g.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid #2a2a2a" }}>
+                  <span style={{ fontSize: 14, color: "#e8e8e8" }}>{g.name}</span>
+                  <span style={{ fontSize: 12, color: "#666" }}>{g.category}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 완료 게임 목록 */}
+          {doneGames.length > 0 && (
+            <div style={S.card}>
+              <p style={{ fontSize: 14, fontWeight: 500, color: "#4ade80", marginBottom: 12 }}>완료 게임 ({doneGames.length}개)</p>
+              {doneGames.map(g => (
+                <div key={g.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid #2a2a2a" }}>
+                  <span style={{ fontSize: 14, color: "#666", textDecoration: "line-through" }}>{g.name}</span>
+                  <span style={{ fontSize: 12, color: "#4ade80" }}>완료</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>)}
+      </>)}
+
+      {tab === "users" && (<>
+        <div style={{ display: "flex", gap: 8, marginBottom: "1rem" }}>
+          {["pending", "all"].map(t => (
+            <button key={t} onClick={() => {}} style={{ ...S.btn, background: "#2a2a2a" }}>
+              {t === "pending" ? `승인 대기 (${pendingUsers.length})` : `전체 (${allUsers.length})`}
+            </button>
+          ))}
+        </div>
+
+        {pendingUsers.length === 0
+          ? <div style={{ ...S.card, textAlign: "center" }}><p style={S.muted}>대기 중인 가입 신청이 없습니다.</p></div>
+          : pendingUsers.map(u => (
+            <div key={u.id} style={S.cardSm}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <p style={{ fontSize: 15, fontWeight: 500, color: "#f0f0f0" }}>{u.name}</p>
+                  <p style={S.muted}>{u.email} · {u.stores?.name || "-"}</p>
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button onClick={() => approveUser(u.id)} style={{ ...S.btn, color: "#4ade80", borderColor: "#4ade80" }}>승인</button>
+                  <button onClick={() => rejectUser(u.id)} style={{ ...S.btn, color: "#f87171", borderColor: "#f87171" }}>거부</button>
+                </div>
+              </div>
+            </div>
+          ))
+        }
+      </>)}
+    </div>
+  );
+}
 export default function App() {
   const [session, setSession] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
@@ -643,6 +858,10 @@ export default function App() {
     </div>
   );
 
+  // 슈퍼바이저 화면
+  if (userProfile.role === "supervisor") return (
+  <SupervisorDashboard userProfile={userProfile} stores={stores} onLogout={handleLogout} />
+);
   // 마스터 관리자 화면
   if (userProfile.role === "master") return (
     <div style={S.wrapWide}>
@@ -657,13 +876,19 @@ export default function App() {
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: "1rem", flexWrap: "wrap" }}>
-        {["pending", "users", "games", "sheet"].map(t => (
+        {["pending", "users", "games", "sheet", "dashboard"].map(t => (
           <button key={t} onClick={() => setAdminTab(t)} style={{ ...S.btn, background: adminTab === t ? "#2a2a2a" : "transparent", fontWeight: adminTab === t ? 500 : 400 }}>
-            {t === "pending" ? `승인 대기 (${pendingUsers.length})` : t === "users" ? `전체 계정 (${allUsers.length})` : t === "games" ? `게임 DB (${games.length})` : "구글 시트"}
+            {t === "pending" ? `승인 대기 (${pendingUsers.length})` 
+              : t === "users" ? `전체 계정 (${allUsers.length})` 
+              : t === "games" ? `게임 DB (${games.length})` 
+              : t === "sheet" ? "구글 시트" 
+              : "대시보드"}
           </button>
         ))}
       </div>
-
+      {adminTab === "dashboard" && (
+      <SupervisorDashboard userProfile={userProfile} stores={stores} onLogout={handleLogout} />
+      )}
       {adminTab === "pending" && (
         pendingUsers.length === 0
           ? <div style={{ ...S.card, textAlign: "center" }}><p style={S.muted}>대기 중인 가입 신청이 없습니다.</p></div>
