@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { supabase } from "./supabase";
 
 const SHEET_ID = "1ag_qUTZ97Dj0RPsjG1G8BnJe5HDPRFZd05QEUwiy4ps";
@@ -6,12 +6,12 @@ const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tq
 
 const S = {
   wrap: { maxWidth: 480, margin: "0 auto", padding: "2rem 1rem", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" },
-  wrapWide: { maxWidth: 700, margin: "0 auto", padding: "1.5rem 1rem", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" },
+  wrapWide: { maxWidth: 760, margin: "0 auto", padding: "1.5rem 1rem", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" },
   card: { background: "#1e1e1e", border: "1px solid #333", borderRadius: 12, padding: "1.5rem", marginBottom: 12 },
   cardSm: { background: "#1e1e1e", border: "1px solid #333", borderRadius: 12, padding: "1rem 1.25rem", marginBottom: 10 },
   input: { width: "100%", boxSizing: "border-box", background: "#252525", border: "1px solid #383838", borderRadius: 8, padding: "10px 12px", fontSize: 14, color: "#e8e8e8", marginBottom: 10, outline: "none" },
   btn: { background: "transparent", border: "1px solid #555", borderRadius: 8, padding: "6px 14px", cursor: "pointer", color: "#e8e8e8", fontSize: 13 },
-  btnPrimary: { background: "#2563eb", border: "none", borderRadius: 8, padding: "10px 16px", cursor: "pointer", color: "#fff", fontSize: 14, fontWeight: 500 },
+  btnPrimary: { background: "#2563eb", border: "none", borderRadius: 8, padding: "8px 16px", cursor: "pointer", color: "#fff", fontSize: 13, fontWeight: 500 },
   btnFull: { width: "100%", background: "transparent", border: "1px solid #555", borderRadius: 8, padding: "10px", cursor: "pointer", color: "#e8e8e8", fontSize: 14, marginBottom: 8 },
   btnPrimaryFull: { width: "100%", background: "#2563eb", border: "none", borderRadius: 8, padding: "10px", cursor: "pointer", color: "#fff", fontSize: 14, marginBottom: 8, fontWeight: 500 },
   h1: { fontSize: 22, fontWeight: 500, color: "#f0f0f0", marginBottom: 6 },
@@ -31,13 +31,369 @@ function parseCSV(text) {
   return lines.slice(1).map(line => {
     const vals = line.match(/(".*?"|[^,]+)(?=,|$)/g) || [];
     const obj = {};
-    headers.forEach((h, i) => {
-      obj[h] = (vals[i] || "").replace(/"/g, "").trim();
-    });
+    headers.forEach((h, i) => { obj[h] = (vals[i] || "").replace(/"/g, "").trim(); });
     return obj;
   }).filter(r => r.name);
 }
 
+// 구성물 관리 모달
+function ComponentManager({ game, onClose }) {
+  const [components, setComponents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [newComp, setNewComp] = useState({ name: "", quantity: 1 });
+  const [uploading, setUploading] = useState(false);
+  const [editId, setEditId] = useState(null);
+  const [editComp, setEditComp] = useState(null);
+  const [lightbox, setLightbox] = useState(null);
+  const fileRef = useRef();
+  const editFileRef = useRef();
+
+  useEffect(() => { loadComponents(); }, []);
+
+  async function loadComponents() {
+    setLoading(true);
+    const { data } = await supabase.from("game_components").select("*").eq("game_id", game.id).order("order_num");
+    if (data) setComponents(data);
+    setLoading(false);
+  }
+
+  async function uploadImage(file) {
+    const ext = file.name.split(".").pop();
+    const path = `components/${Date.now()}.${ext}`;
+    const { error } = await supabase.storage.from("game-images").upload(path, file, {
+      cacheControl: "3600",
+      upsert: true,
+    });
+    if (error) throw error;
+    const { data } = supabase.storage.from("game-images").getPublicUrl(path);
+    return data.publicUrl;
+  }
+
+  async function addComponent() {
+    if (!newComp.name.trim()) return;
+    setUploading(true);
+    let image_url = null;
+    if (fileRef.current?.files[0]) {
+      try { image_url = await uploadImage(fileRef.current.files[0]); } catch {}
+    }
+    await supabase.from("game_components").insert({
+      game_id: game.id, name: newComp.name, quantity: parseInt(newComp.quantity) || 1,
+      image_url, order_num: components.length,
+    });
+    setNewComp({ name: "", quantity: 1 });
+    if (fileRef.current) fileRef.current.value = "";
+    setUploading(false);
+    loadComponents();
+  }
+
+  async function saveEdit() {
+    setUploading(true);
+    let image_url = editComp.image_url;
+    if (editFileRef.current?.files[0]) {
+      try { image_url = await uploadImage(editFileRef.current.files[0]); } catch {}
+    }
+    await supabase.from("game_components").update({ name: editComp.name, quantity: parseInt(editComp.quantity) || 1, image_url }).eq("id", editId);
+    setEditId(null); setEditComp(null);
+    setUploading(false);
+    loadComponents();
+  }
+
+  async function deleteComponent(id, imageUrl) {
+    if (!window.confirm("삭제할까요?")) return;
+    if (imageUrl) {
+      const path = imageUrl.split("/game-images/")[1];
+      if (path) await supabase.storage.from("game-images").remove([path]);
+    }
+    await supabase.from("game_components").delete().eq("id", id);
+    loadComponents();
+  }
+
+  return (
+    <>
+      {/* 라이트박스 */}
+      {lightbox && (
+        <div
+          onClick={() => setLightbox(null)}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 300, cursor: "zoom-out",
+          }}
+        >
+          <img
+            src={lightbox}
+            alt=""
+            style={{ maxWidth: "90vw", maxHeight: "90vh", borderRadius: 8, objectFit: "contain" }}
+            onClick={e => e.stopPropagation()}
+          />
+          <div
+            onClick={() => setLightbox(null)}
+            style={{ position: "absolute", top: 20, right: 24, color: "#fff", fontSize: 28, cursor: "pointer", lineHeight: 1 }}
+          >✕</div>
+        </div>
+      )}
+
+      {/* 모달 */}
+      <div style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
+        display: "flex", alignItems: "flex-start", justifyContent: "center",
+        zIndex: 100, overflowY: "auto", padding: "2rem 1rem",
+      }}>
+        <div style={{ background: "#1a1a1a", borderRadius: 16, padding: "1.5rem", width: "100%", maxWidth: 560, border: "1px solid #333" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 500, color: "#f0f0f0" }}>{game.name}</h2>
+              <p style={S.muted}>구성물 관리</p>
+            </div>
+            <button onClick={onClose} style={S.btn}>닫기</button>
+          </div>
+
+          {/* 구성물 추가 */}
+          <div style={{ background: "#252525", borderRadius: 12, padding: "1rem", marginBottom: 16 }}>
+            <p style={{ fontSize: 13, fontWeight: 500, color: "#aaa", marginBottom: 10 }}>새 구성물 추가</p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input placeholder="구성물 이름" value={newComp.name} onChange={e => setNewComp(c => ({ ...c, name: e.target.value }))} style={{ ...S.input, flex: 2, marginBottom: 0 }} />
+              <input placeholder="수량" type="number" min="1" value={newComp.quantity} onChange={e => setNewComp(c => ({ ...c, quantity: e.target.value }))} style={{ ...S.input, flex: 1, marginBottom: 0 }} />
+            </div>
+            <div style={{ margin: "10px 0" }}>
+              <input type="file" accept="image/*" ref={fileRef} style={{ fontSize: 13, color: "#aaa" }} />
+            </div>
+            <button onClick={addComponent} style={S.btnPrimary} disabled={uploading}>
+              {uploading ? "저장 중..." : "+ 추가"}
+            </button>
+          </div>
+
+          {/* 구성물 목록 */}
+          {loading ? (
+            <p style={S.muted}>불러오는 중...</p>
+          ) : components.length === 0 ? (
+            <p style={{ ...S.muted, textAlign: "center", padding: "1rem" }}>등록된 구성물이 없습니다.</p>
+          ) : (
+            components.map(c => (
+              <div key={c.id} style={{ background: "#222", border: "1px solid #333", borderRadius: 12, padding: "1rem", marginBottom: 10 }}>
+                {editId === c.id ? (
+                  <div>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                      <input value={editComp.name} onChange={e => setEditComp(x => ({ ...x, name: e.target.value }))} style={{ ...S.input, flex: 2, marginBottom: 0 }} />
+                      <input type="number" min="1" value={editComp.quantity} onChange={e => setEditComp(x => ({ ...x, quantity: e.target.value }))} style={{ ...S.input, flex: 1, marginBottom: 0 }} />
+                    </div>
+                    <div style={{ margin: "8px 0" }}>
+                      {editComp.image_url && (
+                        <img src={editComp.image_url} alt="" style={{ width: 60, height: 60, objectFit: "cover", borderRadius: 6, marginRight: 10 }} />
+                      )}
+                      <input type="file" accept="image/*" ref={editFileRef} style={{ fontSize: 13, color: "#aaa" }} />
+                    </div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={saveEdit} style={S.btnPrimary} disabled={uploading}>{uploading ? "저장 중..." : "저장"}</button>
+                      <button onClick={() => { setEditId(null); setEditComp(null); }} style={S.btn}>취소</button>
+                      <button onClick={() => setMethodGame(g)} style={{ ...S.btn, color: "#a78bfa", borderColor: "#a78bfa" }}>관리 방법</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    {c.image_url ? (
+                      <img
+                        src={c.image_url}
+                        alt={c.name}
+                        onClick={() => setLightbox(c.image_url)}
+                        style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 8, flexShrink: 0, cursor: "zoom-in" }}
+                      />
+                    ) : (
+                      <div style={{ width: 56, height: 56, borderRadius: 8, background: "#333", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                        <span style={{ fontSize: 11, color: "#555" }}>없음</span>
+                      </div>
+                    )}
+                    <div style={{ flex: 1 }}>
+                      <p style={{ fontSize: 14, fontWeight: 500, color: "#f0f0f0", margin: 0 }}>{c.name}</p>
+                      <p style={{ ...S.muted, marginTop: 2 }}>수량: {c.quantity}개</p>
+                    </div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={() => { setEditId(c.id); setEditComp(c); }} style={S.btn}>수정</button>
+                      <button onClick={() => deleteComponent(c.id, c.image_url)} style={{ ...S.btn, color: "#f87171" }}>삭제</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+function MethodManager({ game, onClose }) {
+  const [methods, setMethods] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [newMethod, setNewMethod] = useState({ content: "" });
+  const [uploading, setUploading] = useState(false);
+  const [editId, setEditId] = useState(null);
+  const [editMethod, setEditMethod] = useState(null);
+  const [lightbox, setLightbox] = useState(null);
+  const fileRef = useRef();
+  const editFileRef = useRef();
+
+  useEffect(() => { loadMethods(); }, []);
+
+  async function loadMethods() {
+    setLoading(true);
+    const { data } = await supabase.from("game_methods").select("*").eq("game_id", game.id).order("order_num");
+    if (data) setMethods(data);
+    setLoading(false);
+  }
+
+  async function uploadImage(file) {
+    const ext = file.name.split(".").pop();
+    const path = `methods/${Date.now()}.${ext}`;
+    const { error } = await supabase.storage.from("game-images").upload(path, file, {
+      cacheControl: "3600", upsert: true,
+    });
+    if (error) throw error;
+    const { data } = supabase.storage.from("game-images").getPublicUrl(path);
+    return data.publicUrl;
+  }
+
+  async function addMethod() {
+    if (!newMethod.content.trim()) return;
+    setUploading(true);
+    let image_url = null;
+    if (fileRef.current?.files[0]) {
+      try { image_url = await uploadImage(fileRef.current.files[0]); } catch {}
+    }
+    await supabase.from("game_methods").insert({
+      game_id: game.id, content: newMethod.content,
+      image_url, order_num: methods.length,
+    });
+    setNewMethod({ content: "" });
+    if (fileRef.current) fileRef.current.value = "";
+    setUploading(false);
+    loadMethods();
+  }
+
+  async function saveEdit() {
+    setUploading(true);
+    let image_url = editMethod.image_url;
+    if (editFileRef.current?.files[0]) {
+      try { image_url = await uploadImage(editFileRef.current.files[0]); } catch {}
+    }
+    await supabase.from("game_methods").update({ content: editMethod.content, image_url }).eq("id", editId);
+    setEditId(null); setEditMethod(null);
+    setUploading(false);
+    loadMethods();
+  }
+
+  async function deleteMethod(id, imageUrl) {
+    if (!window.confirm("삭제할까요?")) return;
+    if (imageUrl) {
+      const path = imageUrl.split("/game-images/")[1];
+      if (path) await supabase.storage.from("game-images").remove([path]);
+    }
+    await supabase.from("game_methods").delete().eq("id", id);
+    loadMethods();
+  }
+
+  return (
+    <>
+      {/* 라이트박스 */}
+      {lightbox && (
+        <div
+          onClick={() => setLightbox(null)}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 300, cursor: "zoom-out",
+          }}
+        >
+          <img src={lightbox} alt="" style={{ maxWidth: "90vw", maxHeight: "90vh", borderRadius: 8, objectFit: "contain" }} />
+          <div onClick={() => setLightbox(null)} style={{ position: "absolute", top: 20, right: 24, color: "#fff", fontSize: 28, cursor: "pointer" }}>✕</div>
+        </div>
+      )}
+
+      {/* 모달 */}
+      <div style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
+        display: "flex", alignItems: "flex-start", justifyContent: "center",
+        zIndex: 100, overflowY: "auto", padding: "2rem 1rem",
+      }}>
+        <div style={{ background: "#1a1a1a", borderRadius: 16, padding: "1.5rem", width: "100%", maxWidth: 560, border: "1px solid #333" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 500, color: "#f0f0f0" }}>{game.name}</h2>
+              <p style={S.muted}>관리 방법</p>
+            </div>
+            <button onClick={onClose} style={S.btn}>닫기</button>
+          </div>
+
+          {/* 관리 방법 추가 */}
+          <div style={{ background: "#252525", borderRadius: 12, padding: "1rem", marginBottom: 16 }}>
+            <p style={{ fontSize: 13, fontWeight: 500, color: "#aaa", marginBottom: 10 }}>새 관리 방법 추가</p>
+            <textarea
+              placeholder="관리 방법 내용 입력"
+              value={newMethod.content}
+              onChange={e => setNewMethod(m => ({ ...m, content: e.target.value }))}
+              style={{ ...S.input, minHeight: 80, resize: "vertical", marginBottom: 8 }}
+            />
+            <div style={{ margin: "0 0 10px" }}>
+              <input type="file" accept="image/*" ref={fileRef} style={{ fontSize: 13, color: "#aaa" }} />
+            </div>
+            <button onClick={addMethod} style={S.btnPrimary} disabled={uploading}>
+              {uploading ? "저장 중..." : "+ 추가"}
+            </button>
+          </div>
+
+          {/* 관리 방법 목록 */}
+          {loading ? (
+            <p style={S.muted}>불러오는 중...</p>
+          ) : methods.length === 0 ? (
+            <p style={{ ...S.muted, textAlign: "center", padding: "1rem" }}>등록된 관리 방법이 없습니다.</p>
+          ) : (
+            methods.map((m, idx) => (
+              <div key={m.id} style={{ background: "#222", border: "1px solid #333", borderRadius: 12, padding: "1rem", marginBottom: 10 }}>
+                {editId === m.id ? (
+                  <div>
+                    <textarea
+                      value={editMethod.content}
+                      onChange={e => setEditMethod(x => ({ ...x, content: e.target.value }))}
+                      style={{ ...S.input, minHeight: 80, resize: "vertical" }}
+                    />
+                    <div style={{ margin: "0 0 10px" }}>
+                      {editMethod.image_url && (
+                        <img src={editMethod.image_url} alt="" style={{ width: 80, height: 60, objectFit: "cover", borderRadius: 6, marginBottom: 8, display: "block" }} />
+                      )}
+                      <input type="file" accept="image/*" ref={editFileRef} style={{ fontSize: 13, color: "#aaa" }} />
+                    </div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={saveEdit} style={S.btnPrimary} disabled={uploading}>{uploading ? "저장 중..." : "저장"}</button>
+                      <button onClick={() => { setEditId(null); setEditMethod(null); }} style={S.btn}>취소</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: m.image_url ? 10 : 0 }}>
+                      <span style={{ fontSize: 12, fontWeight: 500, color: "#2563eb", minWidth: 20 }}>{idx + 1}.</span>
+                      <p style={{ fontSize: 14, color: "#e8e8e8", margin: 0, flex: 1, lineHeight: 1.6 }}>{m.content}</p>
+                      <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                        <button onClick={() => { setEditId(m.id); setEditMethod(m); }} style={S.btn}>수정</button>
+                        <button onClick={() => deleteMethod(m.id, m.image_url)} style={{ ...S.btn, color: "#f87171" }}>삭제</button>
+                      </div>
+                    </div>
+                    {m.image_url && (
+                      <img
+                        src={m.image_url}
+                        alt=""
+                        onClick={() => setLightbox(m.image_url)}
+                        style={{ width: "100%", maxHeight: 200, objectFit: "cover", borderRadius: 8, cursor: "zoom-in", marginTop: 8 }}
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
 export default function App() {
   const [session, setSession] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
@@ -46,7 +402,6 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPw, setLoginPw] = useState("");
   const [regEmail, setRegEmail] = useState("");
@@ -54,21 +409,19 @@ export default function App() {
   const [regName, setRegName] = useState("");
   const [regStore, setRegStore] = useState("");
   const [stores, setStores] = useState([]);
-
   const [adminTab, setAdminTab] = useState("pending");
   const [pendingUsers, setPendingUsers] = useState([]);
   const [allUsers, setAllUsers] = useState([]);
-
-  // 게임 DB
   const [games, setGames] = useState([]);
   const [gamesLoading, setGamesLoading] = useState(false);
   const [sheetLoading, setSheetLoading] = useState(false);
   const [sheetPreview, setSheetPreview] = useState([]);
   const [sheetMsg, setSheetMsg] = useState("");
-  const [gameTab, setGameTab] = useState("list");
   const [editGame, setEditGame] = useState(null);
   const [addMode, setAddMode] = useState(false);
   const [newGame, setNewGame] = useState({ name: "", category: "", min_players: "", max_players: "", play_time: "", difficulty: "", cycle: "weekly", description: "", note: "" });
+  const [componentGame, setComponentGame] = useState(null);
+  const [methodGame, setMethodGame] = useState(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -115,13 +468,9 @@ export default function App() {
 
   useEffect(() => {
     if (userProfile?.role === "master" || userProfile?.role === "supervisor") {
-      loadPendingUsers();
-      loadAllUsers();
-      loadGames();
+      loadPendingUsers(); loadAllUsers(); loadGames();
     }
-    if (userProfile?.role === "store" && userProfile?.status === "approved") {
-      loadGames();
-    }
+    if (userProfile?.role === "store" && userProfile?.status === "approved") loadGames();
   }, [userProfile]);
 
   async function handleLogin() {
@@ -170,9 +519,7 @@ export default function App() {
       const rows = parseCSV(text);
       setSheetPreview(rows);
       setSheetMsg(`${rows.length}개 게임을 불러왔습니다. 업로드 버튼을 눌러 DB에 저장하세요.`);
-    } catch {
-      setSheetMsg("구글 시트를 불러오지 못했습니다. 공개 설정을 확인해주세요.");
-    }
+    } catch { setSheetMsg("구글 시트를 불러오지 못했습니다."); }
     setSheetLoading(false);
   }
 
@@ -181,24 +528,17 @@ export default function App() {
     setSheetLoading(true); setSheetMsg("");
     try {
       const rows = sheetPreview.map(r => ({
-        name: r.name || "",
-        category: r.category || "",
+        name: r.name || "", category: r.category || "",
         min_players: r.min_players ? parseInt(r.min_players) : null,
         max_players: r.max_players ? parseInt(r.max_players) : null,
-        play_time: r.play_time || "",
-        difficulty: r.difficulty || "",
-        cycle: r.cycle || "weekly",
-        description: r.description || "",
-        note: r.note || "",
+        play_time: r.play_time || "", difficulty: r.difficulty || "",
+        cycle: r.cycle || "weekly", description: r.description || "", note: r.note || "",
       }));
       const { error } = await supabase.from("games").upsert(rows, { onConflict: "name" });
       if (error) throw error;
       setSheetMsg(`${rows.length}개 게임이 DB에 저장됐습니다!`);
-      setSheetPreview([]);
-      loadGames();
-    } catch (e) {
-      setSheetMsg("업로드 중 오류가 발생했습니다: " + e.message);
-    }
+      setSheetPreview([]); loadGames();
+    } catch (e) { setSheetMsg("업로드 중 오류가 발생했습니다: " + e.message); }
     setSheetLoading(false);
   }
 
@@ -206,14 +546,12 @@ export default function App() {
     if (!newGame.name.trim()) return;
     await supabase.from("games").insert({ ...newGame, min_players: newGame.min_players ? parseInt(newGame.min_players) : null, max_players: newGame.max_players ? parseInt(newGame.max_players) : null });
     setNewGame({ name: "", category: "", min_players: "", max_players: "", play_time: "", difficulty: "", cycle: "weekly", description: "", note: "" });
-    setAddMode(false);
-    loadGames();
+    setAddMode(false); loadGames();
   }
 
   async function saveEditGame() {
     await supabase.from("games").update({ ...editGame, min_players: editGame.min_players ? parseInt(editGame.min_players) : null, max_players: editGame.max_players ? parseInt(editGame.max_players) : null }).eq("id", editGame.id);
-    setEditGame(null);
-    loadGames();
+    setEditGame(null); loadGames();
   }
 
   async function deleteGame(id) {
@@ -222,9 +560,7 @@ export default function App() {
     loadGames();
   }
 
-  async function handleLogout() {
-    await supabase.auth.signOut();
-  }
+  async function handleLogout() { await supabase.auth.signOut(); }
 
   if (loading) return <div style={{ textAlign: "center", padding: "4rem", color: "#666", fontFamily: "sans-serif" }}>불러오는 중...</div>;
 
@@ -286,13 +622,13 @@ export default function App() {
   const GameForm = ({ game, setGame, onSave, onCancel }) => (
     <div style={{ ...S.card, background: "#181818" }}>
       <input placeholder="게임 이름 *" value={game.name} onChange={e => setGame(g => ({ ...g, name: e.target.value }))} style={S.input} />
-      <input placeholder="카테고리 (예: 전략, 파티)" value={game.category} onChange={e => setGame(g => ({ ...g, category: e.target.value }))} style={S.input} />
+      <input placeholder="카테고리" value={game.category} onChange={e => setGame(g => ({ ...g, category: e.target.value }))} style={S.input} />
       <div style={{ display: "flex", gap: 8 }}>
         <input placeholder="최소 인원" value={game.min_players} onChange={e => setGame(g => ({ ...g, min_players: e.target.value }))} style={{ ...S.input, flex: 1 }} />
         <input placeholder="최대 인원" value={game.max_players} onChange={e => setGame(g => ({ ...g, max_players: e.target.value }))} style={{ ...S.input, flex: 1 }} />
       </div>
-      <input placeholder="플레이 시간 (예: 30-60분)" value={game.play_time} onChange={e => setGame(g => ({ ...g, play_time: e.target.value }))} style={S.input} />
-      <input placeholder="난이도 (예: 하, 중, 상)" value={game.difficulty} onChange={e => setGame(g => ({ ...g, difficulty: e.target.value }))} style={S.input} />
+      <input placeholder="플레이 시간" value={game.play_time} onChange={e => setGame(g => ({ ...g, play_time: e.target.value }))} style={S.input} />
+      <input placeholder="난이도" value={game.difficulty} onChange={e => setGame(g => ({ ...g, difficulty: e.target.value }))} style={S.input} />
       <select value={game.cycle} onChange={e => setGame(g => ({ ...g, cycle: e.target.value }))} style={S.select}>
         <option value="daily">매일</option>
         <option value="weekly">매주</option>
@@ -310,6 +646,8 @@ export default function App() {
   // 마스터 관리자 화면
   if (userProfile.role === "master") return (
     <div style={S.wrapWide}>
+      {componentGame && <ComponentManager game={componentGame} onClose={() => setComponentGame(null)} />}
+      {methodGame && <MethodManager game={methodGame} onClose={() => setMethodGame(null)} />}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>
         <div>
           <h1 style={{ ...S.h1, marginBottom: 2 }}>마스터 관리자</h1>
@@ -321,7 +659,7 @@ export default function App() {
       <div style={{ display: "flex", gap: 8, marginBottom: "1rem", flexWrap: "wrap" }}>
         {["pending", "users", "games", "sheet"].map(t => (
           <button key={t} onClick={() => setAdminTab(t)} style={{ ...S.btn, background: adminTab === t ? "#2a2a2a" : "transparent", fontWeight: adminTab === t ? 500 : 400 }}>
-            {t === "pending" ? `승인 대기 (${pendingUsers.length})` : t === "users" ? `전체 계정 (${allUsers.length})` : t === "games" ? `게임 DB (${games.length})` : "구글 시트 연동"}
+            {t === "pending" ? `승인 대기 (${pendingUsers.length})` : t === "users" ? `전체 계정 (${allUsers.length})` : t === "games" ? `게임 DB (${games.length})` : "구글 시트"}
           </button>
         ))}
       </div>
@@ -383,7 +721,9 @@ export default function App() {
                     <span style={S.badge()}>{CYCLE_LABEL[g.cycle] || g.cycle}</span>
                     <p style={{ ...S.muted, marginTop: 2 }}>{[g.min_players && `${g.min_players}-${g.max_players}인`, g.play_time, g.difficulty].filter(Boolean).join(" · ")}</p>
                   </div>
-                  <div style={{ display: "flex", gap: 6 }}>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <button onClick={() => setComponentGame(g)} style={{ ...S.btn, color: "#7dd3fc", borderColor: "#7dd3fc" }}>구성물</button>
+                    <button onClick={() => setMethodGame(g)} style={{ ...S.btn, color: "#fbbf24", borderColor: "#fbbf24" }}>관리 방법</button>
                     <button onClick={() => setEditGame(g)} style={S.btn}>수정</button>
                     <button onClick={() => deleteGame(g.id)} style={{ ...S.btn, color: "#f87171" }}>삭제</button>
                   </div>
@@ -399,19 +739,13 @@ export default function App() {
           <div style={S.card}>
             <h2 style={{ ...S.h2, marginBottom: 8 }}>구글 시트 연동</h2>
             <p style={{ ...S.muted, marginBottom: 16, lineHeight: 1.6 }}>
-              구글 시트 1행에 아래 헤더가 있어야 합니다:<br />
+              구글 시트 1행 헤더:<br />
               <code style={{ color: "#7dd3fc", fontSize: 12 }}>name, category, min_players, max_players, play_time, difficulty, cycle, description, note</code>
             </p>
             {sheetMsg && <p style={{ ...S.muted, color: sheetMsg.includes("오류") ? "#f87171" : "#4ade80", marginBottom: 12 }}>{sheetMsg}</p>}
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={fetchSheetPreview} style={S.btnPrimary} disabled={sheetLoading}>
-                {sheetLoading ? "불러오는 중..." : "시트 미리보기"}
-              </button>
-              {sheetPreview.length > 0 && (
-                <button onClick={uploadSheetData} style={{ ...S.btnPrimary, background: "#16a34a" }} disabled={sheetLoading}>
-                  DB에 업로드 ({sheetPreview.length}개)
-                </button>
-              )}
+              <button onClick={fetchSheetPreview} style={S.btnPrimary} disabled={sheetLoading}>{sheetLoading ? "불러오는 중..." : "시트 미리보기"}</button>
+              {sheetPreview.length > 0 && <button onClick={uploadSheetData} style={{ ...S.btnPrimary, background: "#16a34a" }} disabled={sheetLoading}>DB에 업로드 ({sheetPreview.length}개)</button>}
             </div>
           </div>
           {sheetPreview.length > 0 && (
